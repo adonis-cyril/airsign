@@ -1,8 +1,13 @@
 """AirSign — Draw your signature in the air using hand tracking."""
 
+import os
+import sys
 import cv2
-import mediapipe as mp
 import numpy as np
+
+# MediaPipe Tasks API (0.10+)
+import mediapipe as mp
+from mediapipe.tasks.python import vision
 
 # Camera
 CAM_INDEX = 0
@@ -18,7 +23,7 @@ GLOW_THICKNESS = 8
 # Smoothing
 SMOOTHING_WINDOW = 5
 
-# MediaPipe landmark indices
+# MediaPipe hand landmark indices (same as legacy API)
 INDEX_TIP = 8
 INDEX_PIP = 6
 MIDDLE_TIP = 12
@@ -28,10 +33,34 @@ RING_PIP = 14
 PINKY_TIP = 20
 PINKY_PIP = 18
 
+# Hand landmarker model (downloaded on first run if missing)
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(SCRIPT_DIR, "hand_landmarker.task")
+MODEL_URL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
 
-def is_finger_extended(landmarks, tip, pip):
-    """Check if a finger is extended (tip above PIP joint in image coords)."""
-    return landmarks.landmark[tip].y < landmarks.landmark[pip].y
+
+def ensure_model():
+    """Download hand_landmarker.task if not present."""
+    if os.path.isfile(MODEL_PATH):
+        return MODEL_PATH
+    print("Downloading hand landmarker model (one-time)...")
+    try:
+        import urllib.request
+        urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
+        print("Model saved to", MODEL_PATH)
+        return MODEL_PATH
+    except Exception as e:
+        print("Could not download model:", e, file=sys.stderr)
+        print("Download manually from:", MODEL_URL, file=sys.stderr)
+        print("Save as:", MODEL_PATH, file=sys.stderr)
+        sys.exit(1)
+
+
+def is_finger_extended(landmarks, tip_idx, pip_idx):
+    """Check if a finger is extended (tip above PIP in image coords; y is down)."""
+    tip = landmarks[tip_idx]
+    pip = landmarks[pip_idx]
+    return tip.y < pip.y
 
 
 def is_drawing_mode(landmarks):
@@ -61,6 +90,8 @@ def draw_strokes(canvas, strokes):
 
 
 def main():
+    ensure_model()
+
     cap = cv2.VideoCapture(CAM_INDEX)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAM_WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_HEIGHT)
@@ -70,17 +101,25 @@ def main():
         print("On macOS, grant camera access in System Settings > Privacy & Security > Camera.")
         return
 
-    hands = mp.solutions.hands.Hands(
-        static_image_mode=False,
-        max_num_hands=1,
-        min_detection_confidence=0.7,
+    BaseOptions = mp.tasks.BaseOptions
+    HandLandmarker = mp.tasks.vision.HandLandmarker
+    HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
+    VisionRunningMode = mp.tasks.vision.RunningMode
+
+    options = HandLandmarkerOptions(
+        base_options=BaseOptions(model_asset_path=MODEL_PATH),
+        running_mode=VisionRunningMode.VIDEO,
+        num_hands=1,
+        min_hand_detection_confidence=0.7,
         min_tracking_confidence=0.6,
     )
+    landmarker = HandLandmarker.create_from_options(options)
 
-    strokes = []           # completed strokes
-    current_stroke = []    # stroke being drawn
-    raw_points = []        # raw points for smoothing
+    strokes = []
+    current_stroke = []
+    raw_points = []
     was_drawing = False
+    frame_timestamp_ms = 0
 
     print("AirSign running. Controls:")
     print("  Point index finger → draw")
@@ -95,24 +134,27 @@ def main():
 
         frame = cv2.flip(frame, 1)  # mirror
         h, w, _ = frame.shape
-
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = hands.process(rgb)
+
+        # MediaPipe Tasks expect RGB numpy (height, width, 3) uint8
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        result = landmarker.detect_for_video(mp_image, frame_timestamp_ms)
+        frame_timestamp_ms += int(1000 / 30)  # assume ~30 fps
 
         drawing = False
+        hand_landmarks = None
 
-        if results.multi_hand_landmarks:
-            hand = results.multi_hand_landmarks[0]
-
-            if is_drawing_mode(hand):
+        if result.hand_landmarks:
+            # First hand: list of NormalizedLandmark (x, y, z in [0,1] for x,y)
+            hand_landmarks = result.hand_landmarks[0]
+            if is_drawing_mode(hand_landmarks):
                 drawing = True
-                ix = int(hand.landmark[INDEX_TIP].x * w)
-                iy = int(hand.landmark[INDEX_TIP].y * h)
+                ix = int(hand_landmarks[INDEX_TIP].x * w)
+                iy = int(hand_landmarks[INDEX_TIP].y * h)
                 raw_points.append((ix, iy))
                 pt = smooth_point(raw_points)
                 current_stroke.append(pt)
 
-        # Stroke ended — save it
         if was_drawing and not drawing and current_stroke:
             strokes.append(current_stroke)
             current_stroke = []
@@ -120,16 +162,14 @@ def main():
 
         was_drawing = drawing
 
-        # Build and composite the drawing canvas
         canvas = np.zeros((h, w, 3), dtype=np.uint8)
         all_strokes = strokes + ([current_stroke] if current_stroke else [])
         draw_strokes(canvas, all_strokes)
         frame = cv2.add(frame, canvas)
 
-        # Status indicator
         if drawing:
             status, color = "DRAWING", (0, 255, 0)
-        elif results.multi_hand_landmarks:
+        elif hand_landmarks:
             status, color = "PAUSED", (128, 128, 128)
         else:
             status, color = "", (80, 80, 80)
@@ -150,7 +190,7 @@ def main():
 
     cap.release()
     cv2.destroyAllWindows()
-    hands.close()
+    landmarker.close()
 
 
 if __name__ == "__main__":

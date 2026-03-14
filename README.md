@@ -5,13 +5,17 @@ Draw your signature in the air using hand tracking. Uses your webcam to detect y
 ## Setup
 
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate   # On Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 python airsign.py
 ```
 
+On first run, the hand landmarker model (~8MB) is downloaded automatically.
+
 Requires Python 3.8+ and a webcam.
 
-On macOS, grant camera access to your terminal app in **System Settings > Privacy & Security > Camera**.
+**macOS:** Grant camera access to Terminal (or your IDE) in **System Settings → Privacy & Security → Camera**, or the app will report "Could not open camera."
 
 ## Controls
 
