@@ -137,3 +137,10 @@ dist
 # Vite logs files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# MediaPipe model (downloaded on first run)
+hand_landmarker.task
+.venv
+
+__pycache__/
+.DS_Store
